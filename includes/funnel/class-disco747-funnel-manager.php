@@ -179,6 +179,14 @@ class Disco747_Funnel_Manager {
         if ($step->whatsapp_enabled && !empty($step->whatsapp_text)) {
             $whatsapp_notif_sent = $this->send_whatsapp_notification($preventivo, $step, $tracking_id);
         }
+
+        // Non avanzare lo step se l'email al cliente non è stata accettata.
+        // In questo modo il cron potrà ritentare l'invio invece di perdere
+        // definitivamente il messaggio dopo un errore SMTP temporaneo.
+        if ($step->email_enabled && !empty($step->email_body) && !$email_sent) {
+            error_log("[747Disco-Funnel] Step {$next_step_number} NON completato per tracking #{$tracking_id}: email non inviata, retry previsto");
+            return false;
+        }
         
         $emails_log = json_decode($tracking->emails_log, true) ?: array();
         $whatsapp_log = json_decode($tracking->whatsapp_log, true) ?: array();
