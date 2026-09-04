@@ -43,14 +43,14 @@ class Disco747_Funnel_Manager {
         
         $existing = $wpdb->get_row($wpdb->prepare(
             "SELECT * FROM {$this->tracking_table} 
-             WHERE preventivo_id = %d AND funnel_type = %s AND status = 'active'",
+             WHERE preventivo_id = %d AND funnel_type = %s",
             $preventivo_id,
             $funnel_type
         ));
         
-        if ($existing) {
+        if ($existing && $existing->status === 'active') {
             error_log("[747Disco-Funnel] Funnel gia attivo per preventivo #{$preventivo_id}");
-            return false;
+            return (int) $existing->id;
         }
         
         $first_step = $wpdb->get_row($wpdb->prepare(
@@ -66,6 +66,7 @@ class Disco747_Funnel_Manager {
         }
         
         $send_time = $first_step->send_time ?? '09:00:00';
+        $offset_modifier = sprintf('%+d days', (int) $first_step->days_offset);
         
         if ($funnel_type === 'pre_evento') {
             $preventivo = $wpdb->get_row($wpdb->prepare(
@@ -74,17 +75,16 @@ class Disco747_Funnel_Manager {
             ));
             
             if ($preventivo && $preventivo->data_evento) {
-                $next_send_at = date('Y-m-d', strtotime($preventivo->data_evento . ' ' . $first_step->days_offset . ' days')) . ' ' . $send_time;
+                $event_date = new \DateTimeImmutable($preventivo->data_evento, wp_timezone());
+                $next_send_at = $event_date->modify($offset_modifier)->format('Y-m-d') . ' ' . $send_time;
             } else {
-                $next_send_at = date('Y-m-d', strtotime("+{$first_step->days_offset} days")) . ' ' . $send_time;
+                $next_send_at = current_datetime()->modify($offset_modifier)->format('Y-m-d') . ' ' . $send_time;
             }
         } else {
-            $next_send_at = date('Y-m-d', strtotime("+{$first_step->days_offset} days")) . ' ' . $send_time;
+            $next_send_at = current_datetime()->modify($offset_modifier)->format('Y-m-d') . ' ' . $send_time;
         }
         
-        $inserted = $wpdb->insert(
-            $this->tracking_table,
-            array(
+        $tracking_data = array(
                 'preventivo_id' => $preventivo_id,
                 'funnel_type' => $funnel_type,
                 'current_step' => 0,
@@ -93,13 +93,32 @@ class Disco747_Funnel_Manager {
                 'next_send_at' => $next_send_at,
                 'emails_log' => json_encode(array()),
                 'whatsapp_log' => json_encode(array())
-            ),
-            array('%d', '%s', '%d', '%s', '%s', '%s', '%s', '%s')
         );
+
+        if ($existing) {
+            $tracking_data['last_sent_at'] = null;
+            $tracking_data['completed_at'] = null;
+
+            $inserted = $wpdb->update(
+                $this->tracking_table,
+                $tracking_data,
+                array('id' => $existing->id),
+                array('%d', '%s', '%d', '%s', '%s', '%s', '%s', '%s', null, null),
+                array('%d')
+            );
+            $tracking_id = (int) $existing->id;
+        } else {
+            $inserted = $wpdb->insert(
+                $this->tracking_table,
+                $tracking_data,
+                array('%d', '%s', '%d', '%s', '%s', '%s', '%s', '%s')
+            );
+            $tracking_id = (int) $wpdb->insert_id;
+        }
         
-        if ($inserted) {
-            $tracking_id = $wpdb->insert_id;
-            error_log("[747Disco-Funnel] Funnel {$funnel_type} avviato per preventivo #{$preventivo_id} (Tracking ID: {$tracking_id})");
+        if ($inserted !== false) {
+            $operation = $existing ? 'riavviato' : 'avviato';
+            error_log("[747Disco-Funnel] Funnel {$funnel_type} {$operation} per preventivo #{$preventivo_id} (Tracking ID: {$tracking_id}, prossimo invio: {$next_send_at})");
             
             if ($first_step->days_offset == 0) {
                 $this->send_next_step($tracking_id);
@@ -136,7 +155,14 @@ class Disco747_Funnel_Manager {
             return false;
         }
         
-        $next_step_number = $tracking->current_step + 1;
+        // Recupera uno step già fallito dal precedente cron: le versioni
+        // precedenti avanzavano erroneamente il contatore anche con wp_mail=false.
+        $logged_emails = json_decode($tracking->emails_log, true) ?: array();
+        $last_email = !empty($logged_emails) ? end($logged_emails) : array();
+        $retry_step = (!empty($last_email) && isset($last_email['success']) && !$last_email['success'])
+            ? intval($last_email['step'])
+            : 0;
+        $next_step_number = $retry_step > 0 ? $retry_step : $tracking->current_step + 1;
         $step = $wpdb->get_row($wpdb->prepare(
             "SELECT * FROM {$this->sequences_table} 
              WHERE funnel_type = %s AND step_number = %d AND active = 1",
@@ -159,6 +185,14 @@ class Disco747_Funnel_Manager {
         $whatsapp_notif_sent = false;
         if ($step->whatsapp_enabled && !empty($step->whatsapp_text)) {
             $whatsapp_notif_sent = $this->send_whatsapp_notification($preventivo, $step, $tracking_id);
+        }
+
+        // Non avanzare lo step se l'email al cliente non è stata accettata.
+        // In questo modo il cron potrà ritentare l'invio invece di perdere
+        // definitivamente il messaggio dopo un errore SMTP temporaneo.
+        if ($step->email_enabled && !empty($step->email_body) && !$email_sent) {
+            error_log("[747Disco-Funnel] Step {$next_step_number} NON completato per tracking #{$tracking_id}: email non inviata, retry previsto");
+            return false;
         }
         
         $emails_log = json_decode($tracking->emails_log, true) ?: array();
@@ -192,10 +226,15 @@ class Disco747_Funnel_Manager {
             $send_time = $next_step_data->send_time ?? '09:00:00';
             
             if ($tracking->funnel_type === 'pre_evento') {
-                $next_send_at = date('Y-m-d', strtotime($preventivo->data_evento . ' ' . $next_step_data->days_offset . ' days')) . ' ' . $send_time;
+                $event_date = new \DateTimeImmutable($preventivo->data_evento, wp_timezone());
+                $next_send_at = $event_date
+                    ->modify(sprintf('%+d days', (int) $next_step_data->days_offset))
+                    ->format('Y-m-d') . ' ' . $send_time;
             } else {
                 $days_diff = $next_step_data->days_offset - $step->days_offset;
-                $next_send_at = date('Y-m-d', strtotime("+{$days_diff} days")) . ' ' . $send_time;
+                $next_send_at = current_datetime()
+                    ->modify(sprintf('%+d days', (int) $days_diff))
+                    ->format('Y-m-d') . ' ' . $send_time;
             }
         }
         
@@ -653,17 +692,22 @@ class Disco747_Funnel_Manager {
     public function get_pending_sends() {
         global $wpdb;
         
-        // ✅ FIX: Invia email funnel SOLO a preventivi in stato "attivo"
-        // Esclude: confermati, annullati, e qualsiasi altro stato
-        return $wpdb->get_results("
+        // Il pre-conferma lavora sui preventivi attivi; il pre-evento su quelli confermati.
+        // Gli annullati e gli stati incoerenti restano sempre esclusi.
+        $now = current_time('mysql');
+
+        return $wpdb->get_results($wpdb->prepare("
             SELECT t.*, p.nome_cliente, p.email, p.telefono, p.stato
             FROM {$this->tracking_table} t
             LEFT JOIN {$this->preventivi_table} p ON t.preventivo_id = p.id
             WHERE t.status = 'active' 
               AND t.next_send_at IS NOT NULL
-              AND t.next_send_at <= NOW()
-              AND p.stato = 'attivo'
+              AND t.next_send_at <= %s
+              AND (
+                    (t.funnel_type = 'pre_conferma' AND p.stato = 'attivo')
+                 OR (t.funnel_type = 'pre_evento' AND p.stato = 'confermato' AND p.acconto > 0)
+              )
             ORDER BY t.next_send_at ASC
-        ");
+        ", $now));
     }
 }

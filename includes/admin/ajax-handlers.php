@@ -74,6 +74,19 @@ function disco747_ajax_update_preventivo_status() {
         wp_send_json_error('Errore aggiornamento database');
         die();
     }
+
+    // Notifica il sistema funnel del cambio di stato effettuato dalla dashboard.
+    // Questo percorso AJAX è distinto dal form e deve quindi lanciare
+    // esplicitamente gli stessi hook di sincronizzazione.
+    if ($old_status !== $new_status) {
+        if ($new_status === 'confermato' && floatval($preventivo['acconto']) > 0) {
+            do_action('disco747_preventivo_confirmed', $preventivo_id);
+        } elseif ($new_status === 'annullato') {
+            do_action('disco747_preventivo_cancelled', $preventivo_id);
+        } elseif ($new_status === 'attivo' && $old_status !== 'attivo') {
+            do_action('disco747_preventivo_reactivated', $preventivo_id);
+        }
+    }
     
     // Gestione rinominazione file
     $files_renamed = array();

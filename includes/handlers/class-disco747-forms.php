@@ -378,13 +378,9 @@ class Disco747_Forms {
             $this->log('[Forms] ÃƒÂ°Ã…Â¸Ã…Â½Ã‚Â¯ Hook disco747_preventivo_confirmed lanciato (da ' . $old_stato . ' a confermato, ID: ' . $edit_id . ')');
         }
 
-        // ðŸŽ¯ HOOK: Gestione cambio stato preventivo (per funnel)
-        // Quando lo stato cambia da 'attivo' a 'confermato' o 'annullato', ferma il funnel pre-conferma
-        if ($old_stato === 'attivo' && $new_stato === 'confermato') {
-            // Attivo â†’ Confermato: ferma funnel pre-conferma, avvia funnel post-conferma
-            do_action('disco747_preventivo_confirmed', $edit_id);
-            $this->log('[Forms] ðŸŽ¯ Hook disco747_preventivo_confirmed lanciato (da attivo a confermato, ID: ' . $edit_id . ')');
-        } elseif ($old_stato === 'attivo' && $new_stato === 'annullato') {
+        // ðŸŽ¯ HOOK: Gestione degli altri cambi di stato preventivo (per funnel)
+        // La conferma è già gestita una sola volta dal blocco $just_confirmed qui sopra.
+        if ($old_stato === 'attivo' && $new_stato === 'annullato') {
             // Attivo â†’ Annullato: ferma funnel pre-conferma
             do_action('disco747_preventivo_cancelled', $edit_id);
             $this->log('[Forms] ðŸ›‘ Hook disco747_preventivo_cancelled lanciato (da attivo ad annullato, ID: ' . $edit_id . ')');

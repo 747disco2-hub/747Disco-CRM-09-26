@@ -44,7 +44,7 @@ class Disco747_Funnel_Scheduler {
         
         // Check pre-evento giornaliero (alle 09:00)
         if (!wp_next_scheduled('disco747_funnel_check_pre_evento')) {
-            $tomorrow_9am = strtotime('tomorrow 09:00:00');
+            $tomorrow_9am = current_datetime()->modify('tomorrow 09:00:00')->getTimestamp();
             wp_schedule_event($tomorrow_9am, 'daily', 'disco747_funnel_check_pre_evento');
             error_log('[747Disco-Funnel-Scheduler] ✅ Cron giornaliero pre-evento attivato');
         }
@@ -81,9 +81,11 @@ class Disco747_Funnel_Scheduler {
         }
         
         $count = count($pending);
-        error_log("[747Disco-Funnel-Scheduler] 📬 Trovati {$count} invii da processare");
+        $batch_size = 10;
+        $batch = array_slice($pending, 0, $batch_size);
+        error_log("[747Disco-Funnel-Scheduler] 📬 Trovati {$count} invii da processare; batch corrente: " . count($batch));
         
-        foreach ($pending as $tracking) {
+        foreach ($batch as $tracking) {
             try {
                 $this->funnel_manager->send_next_step($tracking->id);
                 error_log("[747Disco-Funnel-Scheduler] ✅ Inviato step per tracking #{$tracking->id}");
@@ -92,6 +94,9 @@ class Disco747_Funnel_Scheduler {
             }
         }
         
+        if ($count > $batch_size) {
+            error_log("[747Disco-Funnel-Scheduler] ⏳ " . ($count - $batch_size) . " invii rimandati al prossimo cron");
+        }
         error_log("[747Disco-Funnel-Scheduler] ✅ Processamento completato");
     }
     
@@ -108,8 +113,8 @@ class Disco747_Funnel_Scheduler {
         $tracking_table = $wpdb->prefix . 'disco747_funnel_tracking';
         
         // Trova eventi confermati con data tra 7 e 14 giorni
-        $date_start = date('Y-m-d', strtotime('+7 days'));
-        $date_end = date('Y-m-d', strtotime('+14 days'));
+        $date_start = current_datetime()->modify('+7 days')->format('Y-m-d');
+        $date_end = current_datetime()->modify('+14 days')->format('Y-m-d');
         
         $preventivi = $wpdb->get_results($wpdb->prepare("
             SELECT p.* 
@@ -184,13 +189,33 @@ class Disco747_Funnel_Scheduler {
     }
     
     /**
-     * Handle preventivo confermato - Stoppa funnel pre-conferma
+     * Handle preventivo confermato - Stoppa il pre-conferma e avvia il pre-evento
      */
     public function handle_preventivo_confirmed($preventivo_id) {
+        global $wpdb;
+
         error_log("[747Disco-Funnel-Scheduler] ✅ Preventivo #{$preventivo_id} confermato");
         $result = $this->funnel_manager->stop_funnel($preventivo_id, 'pre_conferma');
         if ($result) {
             error_log("[747Disco-Funnel-Scheduler] ✅ Funnel pre-conferma stoppato per #{$preventivo_id}");
+        }
+
+        $preventivi_table = $wpdb->prefix . 'disco747_preventivi';
+        $preventivo = $wpdb->get_row($wpdb->prepare(
+            "SELECT stato, acconto, data_evento FROM {$preventivi_table} WHERE id = %d",
+            $preventivo_id
+        ));
+
+        if (!$preventivo || $preventivo->stato !== 'confermato' || floatval($preventivo->acconto) <= 0) {
+            error_log("[747Disco-Funnel-Scheduler] ⚠️ Pre-evento non avviato per #{$preventivo_id}: dati non coerenti con una conferma");
+            return;
+        }
+
+        $tracking_id = $this->funnel_manager->start_funnel($preventivo_id, 'pre_evento');
+        if ($tracking_id) {
+            error_log("[747Disco-Funnel-Scheduler] ✅ Funnel pre-evento attivato per #{$preventivo_id} (Tracking ID: {$tracking_id})");
+        } else {
+            error_log("[747Disco-Funnel-Scheduler] ⚠️ Impossibile attivare il funnel pre-evento per #{$preventivo_id}");
         }
     }
     
@@ -225,15 +250,18 @@ class Disco747_Funnel_Scheduler {
     public function get_cron_status() {
         $next_sends = wp_next_scheduled('disco747_funnel_check_sends');
         $next_pre_evento = wp_next_scheduled('disco747_funnel_check_pre_evento');
+        $now = time();
         
         return array(
             'sends_check' => array(
                 'active' => $next_sends !== false,
-                'next_run' => $next_sends ? date('d/m/Y H:i:s', $next_sends) : 'Non schedulato'
+                'next_run' => $next_sends ? wp_date('d/m/Y H:i:s', $next_sends) : 'Non schedulato',
+                'next_run_relative' => $next_sends ? human_time_diff($now, $next_sends) : 'Non schedulato'
             ),
             'pre_evento_check' => array(
                 'active' => $next_pre_evento !== false,
-                'next_run' => $next_pre_evento ? date('d/m/Y H:i:s', $next_pre_evento) : 'Non schedulato'
+                'next_run' => $next_pre_evento ? wp_date('d/m/Y H:i:s', $next_pre_evento) : 'Non schedulato',
+                'next_run_relative' => $next_pre_evento ? human_time_diff($now, $next_pre_evento) : 'Non schedulato'
             )
         );
     }
