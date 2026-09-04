@@ -155,7 +155,14 @@ class Disco747_Funnel_Manager {
             return false;
         }
         
-        $next_step_number = $tracking->current_step + 1;
+        // Recupera uno step già fallito dal precedente cron: le versioni
+        // precedenti avanzavano erroneamente il contatore anche con wp_mail=false.
+        $logged_emails = json_decode($tracking->emails_log, true) ?: array();
+        $last_email = !empty($logged_emails) ? end($logged_emails) : array();
+        $retry_step = (!empty($last_email) && isset($last_email['success']) && !$last_email['success'])
+            ? intval($last_email['step'])
+            : 0;
+        $next_step_number = $retry_step > 0 ? $retry_step : $tracking->current_step + 1;
         $step = $wpdb->get_row($wpdb->prepare(
             "SELECT * FROM {$this->sequences_table} 
              WHERE funnel_type = %s AND step_number = %d AND active = 1",
