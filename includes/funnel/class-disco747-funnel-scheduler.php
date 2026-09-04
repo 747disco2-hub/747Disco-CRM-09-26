@@ -81,9 +81,11 @@ class Disco747_Funnel_Scheduler {
         }
         
         $count = count($pending);
-        error_log("[747Disco-Funnel-Scheduler] 📬 Trovati {$count} invii da processare");
+        $batch_size = 10;
+        $batch = array_slice($pending, 0, $batch_size);
+        error_log("[747Disco-Funnel-Scheduler] 📬 Trovati {$count} invii da processare; batch corrente: " . count($batch));
         
-        foreach ($pending as $tracking) {
+        foreach ($batch as $tracking) {
             try {
                 $this->funnel_manager->send_next_step($tracking->id);
                 error_log("[747Disco-Funnel-Scheduler] ✅ Inviato step per tracking #{$tracking->id}");
@@ -92,6 +94,9 @@ class Disco747_Funnel_Scheduler {
             }
         }
         
+        if ($count > $batch_size) {
+            error_log("[747Disco-Funnel-Scheduler] ⏳ " . ($count - $batch_size) . " invii rimandati al prossimo cron");
+        }
         error_log("[747Disco-Funnel-Scheduler] ✅ Processamento completato");
     }
     
